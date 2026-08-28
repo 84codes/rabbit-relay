@@ -34,6 +34,16 @@ export class ReconnectController {
       propagate(reason);
       void this.recover(`channel.error: ${reason}`);
     };
+
+    // A close from the application raises no error and, because close() marks
+    // the channel closed before the broker replies, does not reach the
+    // channel's consumers either. Hook it so recovery still runs.
+    const close = ch.close.bind(ch);
+
+    ch.close = (reason?: string, code?: number) =>
+      close(reason, code).finally(() => {
+        void this.recover("channel.close");
+      });
   }
 
   public getBackoffMs() {

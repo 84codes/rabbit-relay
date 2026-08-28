@@ -37,6 +37,16 @@ async function dropConnection(target) {
   await target.withChannel((ch) => {
     ch.connection.socket.destroy();
   });
+
+  // socket.destroy() tears down on a later tick, so wait until the broker has
+  // actually observed the loss. Otherwise callers race against pre-drop health.
+  await waitFor(
+    () =>
+      target
+        .health()
+        .then((h) => !h.connected || !h.channelOpen || h.reconnecting),
+    "connection drop was not observed"
+  );
 }
 
 async function waitFor(check, message, timeout = 8_000) {
