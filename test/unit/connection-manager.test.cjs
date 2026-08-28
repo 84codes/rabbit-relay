@@ -1,6 +1,5 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { EventEmitter } = require("node:events");
 
 const {
   RabbitMQConnectionManager,
@@ -18,26 +17,41 @@ function deferred() {
 }
 
 function fakeChannel() {
-  const channel = new EventEmitter();
-  channel.closeCalls = 0;
-  channel.close = async () => {
-    channel.closeCalls++;
-    channel.emit("close");
+  return {
+    closed: false,
+    closeCalls: 0,
+    onerror: () => {},
+    confirmSelect: async () => {},
+    close: async function () {
+      this.closeCalls++;
+      this.closed = true;
+    },
   };
-  return channel;
+}
+
+function fakeConnection(overrides = {}) {
+  return {
+    closed: false,
+    onerror: () => {},
+    connect: async function () {
+      this.closed = false;
+      return this;
+    },
+    close: async function () {
+      this.closed = true;
+    },
+    channel: async () => fakeChannel(),
+    ...overrides,
+  };
 }
 
 async function raceCloseWithChannelCreation(kind) {
   const opening = deferred();
-  const connection = new EventEmitter();
   const channel = fakeChannel();
-
-  connection.close = async () => connection.emit("close");
-  connection.createChannel = async () => opening.promise;
-  connection.createConfirmChannel = async () => opening.promise;
+  const connection = fakeConnection({ channel: async () => opening.promise });
 
   const manager = new RabbitMQConnectionManager({
-    connector: async () => connection,
+    connector: () => connection,
   });
 
   let channelPromise;
@@ -75,11 +89,10 @@ test("closes an isolated validation channel that resolves after manager shutdown
 
 test("concurrent manager close calls await the same shutdown", async () => {
   const closing = deferred();
-  const connection = new EventEmitter();
-  connection.close = () => closing.promise;
+  const connection = fakeConnection({ close: () => closing.promise });
 
   const manager = new RabbitMQConnectionManager({
-    connector: async () => connection,
+    connector: () => connection,
   });
   await manager.getConnection();
 
@@ -102,15 +115,15 @@ test("concurrent manager close calls await the same shutdown", async () => {
 test("validation session reuses one isolated connection across channels", async () => {
   let connectorCalls = 0;
   let channelCalls = 0;
-  const connection = new EventEmitter();
-  connection.close = async () => connection.emit("close");
-  connection.createChannel = async () => {
-    channelCalls++;
-    return fakeChannel();
-  };
+  const connection = fakeConnection({
+    channel: async () => {
+      channelCalls++;
+      return fakeChannel();
+    },
+  });
 
   const manager = new RabbitMQConnectionManager({
-    connector: async () => {
+    connector: () => {
       connectorCalls++;
       return connection;
     },

@@ -39,9 +39,9 @@ const sub = await broker
 
 This mode calls RabbitMQ topology APIs such as:
 
-- `assertExchange`
-- `assertQueue`
-- `bindQueue`
+- `exchangeDeclare`
+- `queueDeclare`
+- `queueBind`
 
 Use it when the application owns the topology.
 

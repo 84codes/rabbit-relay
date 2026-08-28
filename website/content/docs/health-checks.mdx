@@ -97,7 +97,7 @@ For deeper operations visibility, use:
 
 ## Best-effort status
 
-`amqplib` does not expose a perfect public `isOpen()` API for channels and connections.
+`amqp-client.js` exposes a `closed` flag rather than a positive liveness check for channels and connections.
 
 Rabbit Relay combines its own reconnect state with best-effort checks to report health.
 

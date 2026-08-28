@@ -1,10 +1,10 @@
 ---
-title: amqplib Escape Hatch
+title: AMQP Escape Hatch
 description: Drop down to native AMQP options for advanced behavior while keeping Rabbit Relay's safe defaults.
 icon: DoorOpen
 ---
 
-Rabbit Relay gives you a clean TypeScript API for common RabbitMQ patterns, but it does **not** block access to native RabbitMQ / `amqplib` features.
+Rabbit Relay gives you a clean TypeScript API for common RabbitMQ patterns, but it does **not** block access to native RabbitMQ / AMQP features.
 
 The goal is simple:
 
@@ -33,7 +33,7 @@ Rabbit Relay should not hide or reimplement all of RabbitMQ. Instead, it provide
 
 ## Queue options
 
-Pass native `amqplib` queue options when declaring a queue.
+Pass native AMQP queue options when declaring a queue.
 
 ```ts
 const sub = await broker
@@ -54,7 +54,7 @@ const sub = await broker
   });
 ```
 
-These options are passed to `channel.assertQueue()`.
+These options are passed to `channel.queueDeclare()`.
 
 ---
 
@@ -77,7 +77,7 @@ const sub = await broker
   });
 ```
 
-These options are passed to `channel.assertExchange()`.
+These options are passed to `channel.exchangeDeclare()`.
 
 ---
 
@@ -146,7 +146,7 @@ await sub.consume({
 });
 ```
 
-These options are passed to `channel.consume()`.
+These options are passed to `channel.basicConsume()`.
 
 ---
 
@@ -166,7 +166,7 @@ const sub = await broker
 
 // Later, bind/unbind dynamically:
 await sub.withChannel(async (ch) => {
-  await ch.bindQueue("rooms.q", "rooms.ex", "room.42");
+  await ch.queueBind("rooms.q", "rooms.ex", "room.42");
 });
 ```
 
@@ -178,7 +178,7 @@ For advanced cases, use `withChannel()`.
 
 ```ts
 await broker.withChannel(async (ch) => {
-  await ch.assertExchange("custom.headers.ex", "headers", {
+  await ch.exchangeDeclare("custom.headers.ex", "headers", {
     durable: true,
   });
 });
@@ -188,7 +188,7 @@ You can also use it from the returned broker interface:
 
 ```ts
 await sub.withChannel(async (ch) => {
-  await ch.bindQueue("orders.q", "custom.headers.ex", "", {
+  await ch.queueBind("orders.q", "custom.headers.ex", "", {
     "x-match": "all",
     tenantId: "tenant-1",
   });
@@ -207,14 +207,14 @@ Reach for the escape hatch when you need:
 - custom topology
 - special publish properties
 - custom consume behavior
-- migration from existing `amqplib` code
+- migration from existing raw AMQP client code
 
 ---
 
 ## Summary
 
 - Rabbit Relay simplifies common RabbitMQ usage
-- Native `amqplib` options remain available
+- Native AMQP options remain available
 - Advanced RabbitMQ features are not blocked
 - `withChannel()` gives full control when needed
 

@@ -1,32 +1,36 @@
-import {
-  connect,
-  Channel,
-  ConfirmChannel,
-  ChannelModel,
-} from "amqplib";
+import { AMQPChannel, AMQPClient } from "@cloudamqp/amqp-client";
 import os from "node:os";
 
 export const rabbitMQUrl =
   process.env.RABBITMQ_URL ?? "amqp://user:password@localhost";
 
+export type Connector = (url: string) => AMQPClient;
+
 export type RabbitMQConnectionManagerOptions = {
   url?: string;
   connectionName?: string;
-  connector?: typeof connect;
+  connector?: Connector;
 };
+
+/** amqp-client.js reads the connection name from the URL's `name` parameter. */
+function withConnectionName(url: string, connectionName: string): string {
+  const parsed = new URL(url);
+  parsed.searchParams.set("name", connectionName);
+  return parsed.toString();
+}
 
 export class RabbitMQConnectionManager {
   private readonly url: string;
   private readonly connectionName: string;
-  private readonly connector: typeof connect;
+  private readonly connector: Connector;
 
-  private connection: ChannelModel | null = null;
-  private connectionOpening: Promise<ChannelModel> | null = null;
-  private channel: Channel | null = null;
-  private channelOpening: Promise<Channel> | null = null;
-  private confirmChannel: ConfirmChannel | null = null;
-  private confirmChannelOpening: Promise<ConfirmChannel> | null = null;
-  private isolatedConnections = new Set<ChannelModel>();
+  private connection: AMQPClient | null = null;
+  private connectionOpening: Promise<AMQPClient> | null = null;
+  private channel: AMQPChannel | null = null;
+  private channelOpening: Promise<AMQPChannel> | null = null;
+  private confirmChannel: AMQPChannel | null = null;
+  private confirmChannelOpening: Promise<AMQPChannel> | null = null;
+  private isolatedConnections = new Set<AMQPClient>();
   private closed = false;
   private closePromise: Promise<void> | undefined;
 
@@ -36,17 +40,16 @@ export class RabbitMQConnectionManager {
       options.connectionName ??
       process.env.AMQP_CONN_NAME ??
       `app:${process.title || "node"}@${os.hostname()}#${process.pid}`;
-    this.connector = options.connector ?? connect;
+    this.connector = options.connector ?? ((url: string) => new AMQPClient(url));
   }
 
-  private attachConnectionHandlers(connection: ChannelModel): void {
-    connection.on("blocked", (reason) =>
-      console.warn("[amqp] connection blocked:", reason)
-    );
-    connection.on("unblocked", () =>
-      console.log("[amqp] connection unblocked")
-    );
-    connection.on("close", () => {
+  private attachConnectionHandlers(connection: AMQPClient): void {
+    connection.onblocked = (reason) =>
+      console.warn("[amqp] connection blocked:", reason);
+
+    connection.onunblocked = () => console.log("[amqp] connection unblocked");
+
+    connection.ondisconnect = (error) => {
       if (this.connection === connection) {
         this.connection = null;
         this.connectionOpening = null;
@@ -55,19 +58,17 @@ export class RabbitMQConnectionManager {
         this.confirmChannel = null;
         this.confirmChannelOpening = null;
       }
-    });
-    connection.on("error", (error) => {
-      if (!this.closed) {
+
+      if (error && !this.closed) {
         console.error("[amqp] connection error:", error);
       }
-    });
+    };
   }
 
-  private attachChannelHandlers(
-    channel: Channel | ConfirmChannel,
-    kind: "regular" | "confirm"
-  ): void {
-    channel.on("close", () => {
+  private trackChannel(channel: AMQPChannel, kind: "regular" | "confirm"): void {
+    const propagate = channel.onerror;
+
+    channel.onerror = (reason: string) => {
       if (kind === "regular" && this.channel === channel) {
         this.channel = null;
         this.channelOpening = null;
@@ -77,40 +78,39 @@ export class RabbitMQConnectionManager {
         this.confirmChannel = null;
         this.confirmChannelOpening = null;
       }
-    });
 
-    channel.on("error", (error) => {
       if (!this.closed) {
         console.error(
           `[amqp] ${kind === "confirm" ? "confirm " : ""}channel error:`,
-          error
+          reason
         );
       }
-    });
+
+      propagate(reason);
+    };
   }
 
-  public async getConnection(): Promise<ChannelModel> {
+  public async getConnection(): Promise<AMQPClient> {
     if (this.closed) {
       throw new Error("RabbitMQ connection manager is closed");
     }
 
-    if (this.connection) return this.connection;
+    if (this.connection && !this.connection.closed) return this.connection;
     if (this.connectionOpening) return this.connectionOpening;
 
     this.connectionOpening = (async () => {
       try {
-        const connection = await this.connector(this.url, {
-          clientProperties: {
-            connection_name: this.connectionName,
-          },
-        });
+        const connection = this.connector(
+          withConnectionName(this.url, this.connectionName)
+        );
+        this.attachConnectionHandlers(connection);
+        await connection.connect();
 
         if (this.closed) {
           await connection.close().catch(() => undefined);
           throw new Error("RabbitMQ connection manager is closed");
         }
 
-        this.attachConnectionHandlers(connection);
         this.connection = connection;
         return connection;
       } catch (error) {
@@ -124,25 +124,25 @@ export class RabbitMQConnectionManager {
     return this.connectionOpening;
   }
 
-  public async getChannel(): Promise<Channel> {
+  public async getChannel(): Promise<AMQPChannel> {
     if (this.closed) {
       throw new Error("RabbitMQ connection manager is closed");
     }
 
-    if (this.channel) return this.channel;
+    if (this.channel && !this.channel.closed) return this.channel;
     if (this.channelOpening) return this.channelOpening;
 
     this.channelOpening = (async () => {
       try {
         const connection = await this.getConnection();
-        const channel = await connection.createChannel();
+        const channel = await connection.channel();
 
         if (this.closed) {
           await channel.close().catch(() => undefined);
           throw new Error("RabbitMQ connection manager is closed");
         }
 
-        this.attachChannelHandlers(channel, "regular");
+        this.trackChannel(channel, "regular");
         this.channel = channel;
         return channel;
       } catch (error) {
@@ -156,25 +156,29 @@ export class RabbitMQConnectionManager {
     return this.channelOpening;
   }
 
-  public async getConfirmChannel(): Promise<ConfirmChannel> {
+  public async getConfirmChannel(): Promise<AMQPChannel> {
     if (this.closed) {
       throw new Error("RabbitMQ connection manager is closed");
     }
 
-    if (this.confirmChannel) return this.confirmChannel;
+    if (this.confirmChannel && !this.confirmChannel.closed) {
+      return this.confirmChannel;
+    }
+
     if (this.confirmChannelOpening) return this.confirmChannelOpening;
 
     this.confirmChannelOpening = (async () => {
       try {
         const connection = await this.getConnection();
-        const channel = await connection.createConfirmChannel();
+        const channel = await connection.channel();
+        await channel.confirmSelect();
 
         if (this.closed) {
           await channel.close().catch(() => undefined);
           throw new Error("RabbitMQ connection manager is closed");
         }
 
-        this.attachChannelHandlers(channel, "confirm");
+        this.trackChannel(channel, "confirm");
         this.confirmChannel = channel;
         return channel;
       } catch (error) {
@@ -188,9 +192,9 @@ export class RabbitMQConnectionManager {
     return this.confirmChannelOpening;
   }
 
-  public async createChannel(): Promise<Channel> {
+  public async createChannel(): Promise<AMQPChannel> {
     const connection = await this.getConnection();
-    const channel = await connection.createChannel();
+    const channel = await connection.channel();
 
     if (this.closed) {
       await channel.close().catch(() => undefined);
@@ -201,19 +205,18 @@ export class RabbitMQConnectionManager {
   }
 
   public async createValidationSession(): Promise<{
-    createChannel(): Promise<Channel>;
+    createChannel(): Promise<AMQPChannel>;
     close(): Promise<void>;
   }> {
     if (this.closed) {
       throw new Error("RabbitMQ connection manager is closed");
     }
 
-    const connection = await this.connector(this.url, {
-      clientProperties: {
-        connection_name: `${this.connectionName}:validation`,
-      },
-    });
-    connection.on("error", () => undefined);
+    const connection = this.connector(
+      withConnectionName(this.url, `${this.connectionName}:validation`)
+    );
+    connection.onerror = () => undefined;
+    await connection.connect();
 
     if (this.closed) {
       await connection.close().catch(() => undefined);
@@ -231,13 +234,13 @@ export class RabbitMQConnectionManager {
     };
 
     return {
-      createChannel: async (): Promise<Channel> => {
+      createChannel: async (): Promise<AMQPChannel> => {
         if (this.closed || sessionClosed) {
           throw new Error("RabbitMQ validation session is closed");
         }
 
-        const channel = await connection.createChannel();
-        channel.on("error", () => undefined);
+        const channel = await connection.channel();
+        channel.onerror = () => undefined;
 
         if (this.closed || sessionClosed) {
           await channel.close().catch(() => undefined);
@@ -251,17 +254,12 @@ export class RabbitMQConnectionManager {
   }
 
   public health() {
-    const isOpen = (resource: any): boolean => {
-      if (!resource) return false;
-      if (resource.connection?.stream?.destroyed === true) return false;
-      if (resource.stream?.destroyed === true) return false;
-      return true;
-    };
-
     return {
-      connected: isOpen(this.connection),
-      channelOpen: isOpen(this.channel),
-      confirmChannelOpen: isOpen(this.confirmChannel),
+      connected: this.connection ? !this.connection.closed : false,
+      channelOpen: this.channel ? !this.channel.closed : false,
+      confirmChannelOpen: this.confirmChannel
+        ? !this.confirmChannel.closed
+        : false,
     };
   }
 

@@ -1,4 +1,4 @@
-import { Channel } from "amqplib";
+import { AMQPChannel } from "@cloudamqp/amqp-client";
 import { augmentEvents, EventEnvelope } from "./eventFactories.js";
 import {
   ExchangeConfig,
@@ -177,15 +177,15 @@ export class RabbitMQBroker {
     return redriveDlq(channel, options);
   }
 
-  private async getChannel(): Promise<Channel> {
+  private async getChannel(): Promise<AMQPChannel> {
     return this.reconnect.getChannel();
   }
 
-  private onReconnect(cb: (ch: Channel) => void | Promise<void>) {
+  private onReconnect(cb: (ch: AMQPChannel) => void | Promise<void>) {
     this.reconnect.onReconnect(cb);
   }
 
-  public async withChannel<T>(fn: (channel: Channel) => Promise<T> | T): Promise<T> {
+  public async withChannel<T>(fn: (channel: AMQPChannel) => Promise<T> | T): Promise<T> {
     const channel = await this.getChannel();
     return fn(channel);
   }
@@ -287,7 +287,7 @@ export class RabbitMQBroker {
           message:
             `Binding '${binding.queue}' -> '${binding.exchange}' with routing key ` +
             `'${binding.routingKey}' was included in the plan but not passively validated. ` +
-            `AMQP does not expose a safe binding check through amqplib.`,
+            `AMQP does not expose a safe binding check.`,
         });
       }
 
@@ -356,7 +356,7 @@ export class RabbitMQBroker {
       exchangeConfig,
     });
 
-    const applyTopology = async (channel: Channel): Promise<void> => {
+    const applyTopology = async (channel: AMQPChannel): Promise<void> => {
       if (cfg.topologyMode === "plan-only") {
         return;
       }
@@ -374,11 +374,11 @@ export class RabbitMQBroker {
           }
 
           for (const binding of topologyPlan.bindings) {
-            await channel.bindQueue(
+            await channel.queueBind(
               binding.queue,
               binding.exchange,
               binding.routingKey,
-              binding.arguments
+              binding.arguments ?? {}
             );
           }
         } catch (err) {
@@ -436,6 +436,7 @@ export class RabbitMQBroker {
           emitLifecycle: (eventName, event) =>
             this.lifecycle.emit(eventName, event),
           shutdownTimeoutMs: this.shutdownTimeoutMs,
+          requestRecovery: (reason) => void this.reconnect.recover(reason),
         })
       : null;
 
@@ -550,7 +551,7 @@ export class RabbitMQBroker {
       return publisher.request<TReply>(event as EventEnvelope, opts);
     };
 
-    const withChannel = async <T>(fn: (channel: Channel) => Promise<T> | T): Promise<T> => {
+    const withChannel = async <T>(fn: (channel: AMQPChannel) => Promise<T> | T): Promise<T> => {
       const channel = await this.getChannel();
       return fn(channel);
     };

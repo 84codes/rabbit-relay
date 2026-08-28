@@ -28,6 +28,17 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+/**
+ * Simulate a network failure. A clean connection.close() is a client-initiated
+ * shutdown, which deliberately does not trigger recovery; destroying the socket
+ * is what a dropped connection actually looks like.
+ */
+async function dropConnection(target) {
+  await target.withChannel((ch) => {
+    ch.connection.socket.destroy();
+  });
+}
+
 async function waitFor(check, message, timeout = 8_000) {
   const deadline = Date.now() + timeout;
   let lastError;
@@ -112,7 +123,7 @@ test("retries, dead-letters, dry-runs, and redrives safely", { timeout: timeoutM
 
     await waitFor(
       () => broker.withChannel(async (channel) => {
-        const info = await channel.checkQueue(`${id}.dlq`);
+        const info = await channel.queueDeclare(`${id}.dlq`, { passive: true });
         return info.messageCount === 1;
       }),
       "message did not reach the DLQ"
@@ -386,8 +397,8 @@ test("passive startup reports every missing resource without poisoning the broke
 
     await broker.withChannel(async (channel) => {
       const probeQueue = `${id}.probe.q`;
-      await channel.assertQueue(probeQueue, { durable: false, autoDelete: true });
-      await channel.deleteQueue(probeQueue);
+      await channel.queueDeclare(probeQueue, { durable: false, autoDelete: true });
+      await channel.queueDelete(probeQueue);
     });
 
     assert.equal((await broker.health()).reconnecting, false);
@@ -518,12 +529,7 @@ test("recovers from connection drop during active consumption", { timeout: timeo
     await waitFor(() => received.length === 1, "first message not received");
 
     // Force-close the underlying TCP connection by closing all channels
-    await broker.withChannel((ch) =>
-      new Promise((resolve, reject) => {
-        ch.on("close", resolve);
-        ch.connection.close();
-      })
-    );
+    await dropConnection(broker);
 
     // Wait for connection-level recovery AND consumer re-registration
     await waitFor(
@@ -566,12 +572,7 @@ test("survives multiple rapid connection interruptions", { timeout: timeoutMs },
 
     // Interrupt the connection 3 times in quick succession
     for (let i = 0; i < 3; i++) {
-      await broker.withChannel((ch) =>
-        new Promise((resolve, reject) => {
-          ch.on("close", resolve);
-          ch.connection.close();
-        })
-      );
+      await dropConnection(broker);
 
       await waitFor(
         () => broker.health().then((h) =>
@@ -650,7 +651,7 @@ test("schema validation dead-letters invalid payload", { timeout: timeoutMs }, a
     // Wait for 2 messages in DLQ
     await waitFor(
       () => broker.withChannel(async (channel) => {
-        const info = await channel.checkQueue(`${id}.dlq`);
+        const info = await channel.queueDeclare(`${id}.dlq`, { passive: true });
         return info.messageCount >= 2;
       }),
       "expected 2 messages in DLQ (handler error + schema rejection)"
@@ -803,7 +804,7 @@ test("middleware can reject a message before handler", { timeout: timeoutMs }, a
 
     await waitFor(
       () => broker.withChannel(async (channel) => {
-        const info = await channel.checkQueue(`${id}.dlq`);
+        const info = await channel.queueDeclare(`${id}.dlq`, { passive: true });
         return info.messageCount === 1;
       }),
       "middleware-rejected message did not reach the DLQ"
@@ -880,7 +881,7 @@ test("onError requeue returns message to the queue", { timeout: timeoutMs }, asy
     await consumer.stop();
 
     // Message was requeued so it should still be in the queue
-    const info = await broker.withChannel((ch) => ch.checkQueue(`${id}.q`));
+    const info = await broker.withChannel((ch) => ch.queueDeclare(`${id}.q`, { passive: true }));
     assert.equal(info.messageCount, 1, "requeued message should remain in queue");
     assert.ok(deliveryCount >= 1, "handler should have been called at least once");
   } finally {
@@ -926,7 +927,7 @@ test("immediate retry without delayMs still retries then dead-letters", { timeou
 
     await waitFor(
       () => broker.withChannel(async (channel) => {
-        const info = await channel.checkQueue(`${id}.dlq`);
+        const info = await channel.queueDeclare(`${id}.dlq`, { passive: true });
         return info.messageCount === 1;
       }),
       "immediate-retry message did not reach the DLQ"
@@ -1338,7 +1339,7 @@ test("lifecycle retry.scheduled fires with correct count", { timeout: timeoutMs 
     // Wait for 2 retry events + final dead-letter
     await waitFor(
       () => broker.withChannel(async (ch) => {
-        const info = await ch.checkQueue(`${id}.dlq`);
+        const info = await ch.queueDeclare(`${id}.dlq`, { passive: true });
         return info.messageCount === 1;
       }),
       "message did not reach DLQ after retries"
@@ -1429,7 +1430,7 @@ test("onError ack silently consumes on handler error", { timeout: timeoutMs }, a
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     // Queue should be empty - message was acked despite the error
-    const info = await broker.withChannel((ch) => ch.checkQueue(`${id}.q`));
+    const info = await broker.withChannel((ch) => ch.queueDeclare(`${id}.q`, { passive: true }));
     assert.equal(info.messageCount, 0);
   } finally {
     await broker.close();
@@ -1464,7 +1465,7 @@ test("requeueOnError legacy option requeues on handler error", { timeout: timeou
     await consumer.stop();
 
     // Message requeued - still in queue
-    const info = await broker.withChannel((ch) => ch.checkQueue(`${id}.q`));
+    const info = await broker.withChannel((ch) => ch.queueDeclare(`${id}.q`, { passive: true }));
     assert.equal(info.messageCount, 1);
   } finally {
     await broker.close();
@@ -1555,7 +1556,7 @@ test("handler that throws a non-error value still retries and dead-letters", { t
 
     await waitFor(
       () => broker.withChannel(async (channel) => {
-        const info = await channel.checkQueue(`${id}.dlq`);
+        const info = await channel.queueDeclare(`${id}.dlq`, { passive: true });
         return info.messageCount === 1;
       }),
       "message did not reach the DLQ"
@@ -1606,7 +1607,7 @@ test("invalidMessage requeue returns invalid messages to queue", { timeout: time
     await consumer.stop();
 
     // Message was requeued - still in queue
-    const info = await broker.withChannel((ch) => ch.checkQueue(`${id}.q`));
+    const info = await broker.withChannel((ch) => ch.queueDeclare(`${id}.q`, { passive: true }));
     assert.equal(info.messageCount, 1);
   } finally {
     await broker.close();
@@ -1648,7 +1649,7 @@ test("invalidMessage ack silently discards invalid messages", { timeout: timeout
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     // Message was acked - queue is empty
-    const info = await broker.withChannel((ch) => ch.checkQueue(`${id}.q`));
+    const info = await broker.withChannel((ch) => ch.queueDeclare(`${id}.q`, { passive: true }));
     assert.equal(info.messageCount, 0);
   } finally {
     await broker.close();
@@ -1707,7 +1708,7 @@ test("consumer withChannel can access raw AMQP channel", { timeout: timeoutMs },
     await relay.consume({ prefetch: 1, concurrency: 1 });
 
     // Use withChannel on the consumer subscriber
-    const info = await relay.withChannel(async (ch) => ch.checkQueue(`${id}.q`));
+    const info = await relay.withChannel(async (ch) => ch.queueDeclare(`${id}.q`, { passive: true }));
     assert.ok(info.messageCount >= 0);
     assert.equal(typeof info.consumerCount, "number");
   } finally {
@@ -1764,12 +1765,7 @@ test("broker reconnect lifecycle event fires", { timeout: timeoutMs }, async () 
     await relay.consume({ prefetch: 1, concurrency: 1 });
 
     // Force a channel-level close to trigger reconnect
-    await relay.withChannel((ch) =>
-      new Promise((resolve) => {
-        ch.on("close", resolve);
-        ch.connection.close();
-      })
-    );
+    await dropConnection(relay);
 
     await waitFor(
       () => broker.health().then((h) =>
@@ -2063,7 +2059,7 @@ test("consumer handles non-JSON message body without crashing", { timeout: timeo
 
     // Now publish a raw non-JSON message directly to the exchange
     await relay.withChannel(async (ch) => {
-      ch.publish(`${id}.ex`, eventName, Buffer.from("not json"), {});
+      await ch.basicPublish(`${id}.ex`, eventName, Buffer.from("not json"));
     });
 
     // Publish another valid event after the non-JSON one
@@ -2113,11 +2109,11 @@ test("consumer acks message when no handler matches event name", { timeout: time
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     // Queue should be empty (message was acked, not stuck or dead-lettered)
-    const info = await broker.withChannel((ch) => ch.checkQueue(`${id}.q`));
+    const info = await broker.withChannel((ch) => ch.queueDeclare(`${id}.q`, { passive: true }));
     assert.equal(info.messageCount, 0);
 
     // DLQ should also be empty (message was acked, not dead-lettered)
-    const dlqInfo = await broker.withChannel((ch) => ch.checkQueue(`${id}.dlq`));
+    const dlqInfo = await broker.withChannel((ch) => ch.queueDeclare(`${id}.dlq`, { passive: true }));
     assert.equal(dlqInfo.messageCount, 0);
 
     // Handler for eventName should never have been called
@@ -2162,12 +2158,7 @@ test("reconnect callback failure does not prevent other callbacks from running",
     await relay.consume({ prefetch: 1, concurrency: 1 });
 
     // Force a channel-level close to trigger reconnect
-    await relay.withChannel((ch) =>
-      new Promise((resolve) => {
-        ch.on("close", resolve);
-        ch.connection.close();
-      })
-    );
+    await dropConnection(relay);
 
     await waitFor(
       () => broker.health().then((h) =>

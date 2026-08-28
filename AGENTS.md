@@ -1,7 +1,7 @@
 # Rabbit Relay agent instructions
 
 Rabbit Relay is a stable, type-safe RabbitMQ framework for Node.js. It builds on
-`amqplib` and deliberately keeps exchanges, queues, bindings, routing keys,
+[`amqp-client.js`](https://github.com/cloudamqp/amqp-client.js) and deliberately keeps exchanges, queues, bindings, routing keys,
 acknowledgements, retries, dead-letter queues, confirms, and topology ownership
 explicit.
 

@@ -149,7 +149,7 @@ const sub = await broker
 | `maxMessageBytes` | Maximum serialized event size |
 | `queueArgs` | Queue arguments passed to RabbitMQ |
 | `deadLetter` | Built-in dead-letter topology helper |
-| `amqp` | Native amqplib escape hatch options |
+| `amqp` | Native AMQP escape hatch options |
 
 ---
 
@@ -267,7 +267,7 @@ Supported consume options include:
 | `onError` | Error behavior: `ack`, `requeue`, `dead-letter`, or `retry` |
 | `retry` | Retry settings when `onError: "retry"` |
 | `dedupe` | Consumer-side duplicate suppression |
-| `amqp.consume` | Native amqplib consume options |
+| `amqp.consume` | Native AMQP consume options |
 
 ---
 
@@ -417,11 +417,11 @@ Health includes connection/channel state and consumer state.
 
 ## withChannel escape hatch
 
-Use `withChannel()` for advanced amqplib operations.
+Use `withChannel()` for advanced amqp-client.js operations.
 
 ```ts
 await broker.withChannel(async (channel) => {
-  const info = await channel.checkQueue("orders.q");
+  const info = await channel.queueDeclare("orders.q", { passive: true });
   console.log(info.messageCount);
 });
 ```

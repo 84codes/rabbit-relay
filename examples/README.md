@@ -31,7 +31,7 @@ npx tsx examples/<example-folder>/<file>.ts
 | `04-plugins` | Cross-cutting plugin hooks for logging, headers, metrics, tracing |
 | `05-backpressure` | Publisher and consumer backpressure |
 | `06-retry-dlq` | Immediate retry followed by DLQ |
-| `07-escape-hatch` | Native `amqplib` options and raw channel access |
+| `07-escape-hatch` | Native AMQP options and raw channel access |
 | `08-health-shutdown` | Health checks and graceful shutdown |
 | `09-developer-experience` | Headers, tracing metadata, middleware, dedupe, size guard, RPC |
 | `10-delayed-retry` | Delayed retry using TTL + DLX |

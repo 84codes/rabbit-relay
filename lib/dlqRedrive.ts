@@ -1,5 +1,8 @@
-import { Channel, GetMessage, Options } from "amqplib";
-import { publishWithBackpressure } from "./backpressure.js";
+import { AMQPChannel, AMQPMessage } from "@cloudamqp/amqp-client";
+import {
+  AmqpPublishOptions,
+  toProperties,
+} from "./amqpOptions.js";
 
 export interface DlqRedriveOptions {
   /**
@@ -93,7 +96,7 @@ function getErrorMessage(err: unknown): string {
   }
 }
 
-function getRedriveCount(msg: GetMessage): number {
+function getRedriveCount(msg: AMQPMessage): number {
   const raw = msg.properties.headers?.[REDRIVE_COUNT_HEADER];
 
   if (typeof raw === "number") return raw;
@@ -107,11 +110,11 @@ function getRedriveCount(msg: GetMessage): number {
 }
 
 function buildRedrivePublishOptions(params: {
-  msg: GetMessage;
+  msg: AMQPMessage;
   fromQueue: string;
   toExchange: string;
   routingKey: string;
-}): Options.Publish {
+}): AmqpPublishOptions {
   const { msg, fromQueue, toExchange, routingKey } = params;
 
   return {
@@ -157,13 +160,15 @@ function normalizeLimit(limit: number | undefined): number {
  * - preserves message body and AMQP properties
  */
 export async function redriveDlq(
-  channel: Channel,
+  channel: AMQPChannel,
   options: DlqRedriveOptions
 ): Promise<DlqRedriveResult> {
   const limit = normalizeLimit(options.limit);
   const dryRun = options.dryRun ?? false;
 
-  const queueInfo = await channel.checkQueue(options.fromQueue);
+  const queueInfo = await channel.queueDeclare(options.fromQueue, {
+    passive: true,
+  });
 
   const result: DlqRedriveResult = {
     fromQueue: options.fromQueue,
@@ -184,7 +189,7 @@ export async function redriveDlq(
   }
 
   for (let i = 0; i < limit; i++) {
-    const msg = await channel.get(options.fromQueue, {
+    const msg = await channel.basicGet(options.fromQueue, {
       noAck: false,
     });
 
@@ -195,23 +200,24 @@ export async function redriveDlq(
 
     result.attempted++;
 
-    const routingKey = options.routingKey ?? msg.fields.routingKey;
+    const routingKey = options.routingKey ?? msg.routingKey;
 
     try {
-      await publishWithBackpressure(
-        channel,
+      await channel.basicPublish(
         options.toExchange,
         routingKey,
-        msg.content,
-        buildRedrivePublishOptions({
-          msg,
-          fromQueue: options.fromQueue,
-          toExchange: options.toExchange,
-          routingKey,
-        })
+        msg.body,
+        toProperties(
+          buildRedrivePublishOptions({
+            msg,
+            fromQueue: options.fromQueue,
+            toExchange: options.toExchange,
+            routingKey,
+          })
+        )
       );
 
-      channel.ack(msg);
+      await msg.ack();
 
       result.republished++;
       result.acked++;
@@ -225,7 +231,7 @@ export async function redriveDlq(
 
       try {
         // Do not lose the original DLQ message if republish failed.
-        channel.nack(msg, false, true);
+        await msg.nack(true);
       } catch (nackErr) {
         result.errors.push({
           message: `Failed to requeue original DLQ message after redrive error: ${getErrorMessage(nackErr)}`,

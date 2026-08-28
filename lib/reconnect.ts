@@ -1,8 +1,8 @@
-import { Channel } from "amqplib";
+import { AMQPChannel } from "@cloudamqp/amqp-client";
 
 export class ReconnectController {
   /** The current live channel promise (created lazily and replaced after reconnect). */
-  private channelPromise: Promise<Channel> | null = null;
+  private channelPromise: Promise<AMQPChannel> | null = null;
 
   /** Reconnect state */
   private reconnecting = false;
@@ -11,10 +11,10 @@ export class ReconnectController {
   private readonly maxBackoffMs = 20000;
 
   /** Callbacks to run after a successful reconnect (like re-assert topology, resume consume). */
-  private onReconnectCbs: Array<(ch: Channel) => void | Promise<void>> = [];
-  private readonly openChannel: () => Promise<Channel>;
+  private onReconnectCbs: Array<(ch: AMQPChannel) => void | Promise<void>> = [];
+  private readonly openChannel: () => Promise<AMQPChannel>;
 
-  constructor(openChannel: () => Promise<Channel>) {
+  constructor(openChannel: () => Promise<AMQPChannel>) {
     this.openChannel = openChannel;
   }
 
@@ -26,11 +26,14 @@ export class ReconnectController {
 
     this.backoffMs = 500;
 
-    const onClose = () => this.scheduleReconnect("channel.close");
-    const onError = () => this.scheduleReconnect("channel.error");
+    // amqp-client.js channels are not event emitters: onerror fires for both
+    // server-side channel closes and connection loss.
+    const propagate = ch.onerror;
 
-    (ch as any).on?.("close", onClose);
-    (ch as any).on?.("error", onError);
+    ch.onerror = (reason: string) => {
+      propagate(reason);
+      void this.recover(`channel.error: ${reason}`);
+    };
   }
 
   public getBackoffMs() {
@@ -41,11 +44,11 @@ export class ReconnectController {
     return this.reconnecting;
   }
 
-  public onReconnect(cb: (ch: Channel) => void | Promise<void>) {
+  public onReconnect(cb: (ch: AMQPChannel) => void | Promise<void>) {
     this.onReconnectCbs.push(cb);
   }
 
-  public async getChannel(): Promise<Channel> {
+  public async getChannel(): Promise<AMQPChannel> {
     if (this.closed) {
       throw new Error("[broker] RabbitMQ broker is closed");
     }
@@ -54,7 +57,16 @@ export class ReconnectController {
       await this.initChannel();
     }
 
-    return this.channelPromise!;
+    const channel = await this.channelPromise!;
+
+    // A channel closed by the application raises no error, so there is nothing
+    // to recover from eagerly. Reopen it on next use instead.
+    if (channel.closed) {
+      await this.initChannel();
+      return this.channelPromise!;
+    }
+
+    return channel;
   }
 
   public close() {
@@ -64,7 +76,8 @@ export class ReconnectController {
     this.onReconnectCbs = [];
   }
 
-  private async scheduleReconnect(reason: string) {
+  /** Reopen the channel and replay topology and consumers, with backoff. */
+  public async recover(reason: string) {
     if (this.closed || this.reconnecting) return;
 
     this.reconnecting = true;

@@ -1,4 +1,12 @@
-import { Channel, Options } from "amqplib";
+import { AMQPChannel } from "@cloudamqp/amqp-client";
+import {
+  AmqpArguments,
+  AmqpExchangeOptions,
+  AmqpQueueOptions,
+  amqpReplyCode,
+  exchangeArgumentsFrom,
+  queueArgumentsFrom,
+} from "./amqpOptions.js";
 import {
   DeadLetterConfig,
   ExchangeConfig,
@@ -14,15 +22,15 @@ import {
 } from "./topologyPlan.js";
 
 function mergeArguments(
-  ...args: Array<Options.AssertQueue["arguments"] | undefined>
-): Options.AssertQueue["arguments"] | undefined {
+  ...args: Array<AmqpArguments | undefined>
+): AmqpArguments | undefined {
   const merged = Object.assign({}, ...args.filter(Boolean));
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
 function mergeBindArguments(
-  ...args: Array<Record<string, unknown> | undefined>
-): Record<string, unknown> | undefined {
+  ...args: Array<AmqpArguments | undefined>
+): AmqpArguments | undefined {
   const merged = Object.assign({}, ...args.filter(Boolean));
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
@@ -76,9 +84,9 @@ export function resolveTopologyMode(
 
 /**
  * Extract the specific inequivalent argument/attribute and resource name from
- * an amqplib 406 PRECONDITION_FAILED error so we can give actionable advice.
+ * a 406 PRECONDITION_FAILED channel error so we can give actionable advice.
  *
- * amqplib errors look like, e.g.:
+ * The broker reply text looks like, e.g.:
  *   PRECONDITION_FAILED - inequivalent arg 'x-dead-letter-exchange' for queue
  *   'tasks.q' in vhost '/': received 'none' but current is the value 'dlx' of
  *   type 'longstr'
@@ -130,7 +138,7 @@ function buildPreconditionMessage(
 
 function buildDeadLetterQueueArguments(
   deadLetter?: DeadLetterConfig
-): Options.AssertQueue["arguments"] | undefined {
+): AmqpArguments | undefined {
   if (!deadLetter) return undefined;
 
   return {
@@ -142,7 +150,7 @@ function buildDeadLetterQueueArguments(
 }
 
 async function assertDeadLetterTopology(params: {
-  channel: Channel;
+  channel: AMQPChannel;
   durable: boolean;
   deadLetter?: DeadLetterConfig;
 }) {
@@ -159,21 +167,34 @@ async function assertDeadLetterTopology(params: {
   const exchangeType = deadLetter.exchangeType ?? "topic";
   const routingKey = deadLetter.routingKey ?? "#";
 
-  await channel.assertExchange(deadLetter.exchange, exchangeType, {
+  const exchangeOptions: AmqpExchangeOptions = {
     durable,
     ...(deadLetter.exchangeOptions ?? {}),
-  });
+  };
 
-  await channel.assertQueue(deadLetter.queue, {
+  await channel.exchangeDeclare(
+    deadLetter.exchange,
+    exchangeType,
+    exchangeOptions,
+    exchangeArgumentsFrom(exchangeOptions)
+  );
+
+  const queueOptions: AmqpQueueOptions = {
     durable,
     ...(deadLetter.queueOptions ?? {}),
-  });
+  };
 
-  await channel.bindQueue(
+  await channel.queueDeclare(
+    deadLetter.queue,
+    queueOptions,
+    queueArgumentsFrom(queueOptions)
+  );
+
+  await channel.queueBind(
     deadLetter.queue,
     deadLetter.exchange,
     routingKey,
-    deadLetter.bindArguments
+    deadLetter.bindArguments ?? {}
   );
 }
 
@@ -228,7 +249,7 @@ export function createTopologyPlan(params: {
   const queues: TopologyQueuePlan[] = [];
   const bindings: TopologyBindingPlan[] = [];
 
-  const exchangeOptions: Options.AssertExchange = {
+  const exchangeOptions: AmqpExchangeOptions = {
     durable: cfg.durable,
     ...(cfg.amqp?.exchange ?? {}),
   };
@@ -283,7 +304,7 @@ export function createTopologyPlan(params: {
   const queueAmqpOptions = {
     ...(cfg.amqp?.queue ?? {}),
     ...(queueConfig?.amqp?.queue ?? {}),
-  } as Options.AssertQueue;
+  } as AmqpQueueOptions;
 
   const deadLetterArgs = buildDeadLetterQueueArguments(cfg.deadLetter);
 
@@ -335,18 +356,23 @@ export function createAssertTopology(params: {
   const { exchangeName, queueName, queueConfig, defaultCfg, exchangeConfig } =
     params;
 
-  return async function assertTopology(channel: Channel) {
+  return async function assertTopology(channel: AMQPChannel) {
     const cfg = mergeInternalCfg(defaultCfg, exchangeConfig);
 
-    const exchangeOpts: Options.AssertExchange = {
+    const exchangeOpts: AmqpExchangeOptions = {
       durable: cfg.durable,
       ...(cfg.amqp?.exchange ?? {}),
     };
 
     try {
-      await channel.assertExchange(exchangeName, cfg.exchangeType, exchangeOpts);
-    } catch (err: any) {
-      if (err?.code === 406) {
+      await channel.exchangeDeclare(
+        exchangeName,
+        cfg.exchangeType,
+        exchangeOpts,
+        exchangeArgumentsFrom(exchangeOpts)
+      );
+    } catch (err: unknown) {
+      if (amqpReplyCode(err) === 406) {
         throw new Error(
           buildPreconditionMessage(
             extractPreconditionDetail(err),
@@ -367,7 +393,7 @@ export function createAssertTopology(params: {
     const queueAmqpOptions = {
       ...(cfg.amqp?.queue ?? {}),
       ...(queueConfig?.amqp?.queue ?? {}),
-    } as Options.AssertQueue;
+    } as AmqpQueueOptions;
 
     const deadLetterArgs = buildDeadLetterQueueArguments(cfg.deadLetter);
 
@@ -383,11 +409,9 @@ export function createAssertTopology(params: {
       }
 
       try {
-        await channel.checkQueue(queueName);
-      } catch (err: any) {
-        const code = err?.code;
-
-        if (code === 404) {
+        await channel.queueDeclare(queueName, { passive: true });
+      } catch (err: unknown) {
+        if (amqpReplyCode(err) === 404) {
           throw new Error(
             `[broker] passiveQueue check failed: queue '${queueName}' does not exist. ` +
               `Either create it in your setup step with the desired arguments, ` +
@@ -406,15 +430,15 @@ export function createAssertTopology(params: {
           queueConfig?.amqp?.queue?.arguments
         );
 
-        const qOpts: Options.AssertQueue = {
+        const qOpts: AmqpQueueOptions = {
           durable: cfg.durable,
           ...queueAmqpOptions,
           ...(mergedArgs ? { arguments: mergedArgs } : {}),
         };
 
-        await channel.assertQueue(queueName, qOpts);
-      } catch (err: any) {
-        if (err?.code === 406) {
+        await channel.queueDeclare(queueName, qOpts, queueArgumentsFrom(qOpts));
+      } catch (err: unknown) {
+        if (amqpReplyCode(err) === 406) {
           throw new Error(
             buildPreconditionMessage(
               extractPreconditionDetail(err),
@@ -432,7 +456,12 @@ export function createAssertTopology(params: {
       const bindArgs = mergeBindArguments(cfg.amqp?.bind);
 
       // (Re)bind is idempotent - safe to call even if binding already exists
-      await channel.bindQueue(queueName, exchangeName, cfg.routingKey, bindArgs);
+      await channel.queueBind(
+        queueName,
+        exchangeName,
+        cfg.routingKey,
+        bindArgs ?? {}
+      );
     }
   };
 }

@@ -98,7 +98,7 @@ Exchange-level options override broker-level defaults.
 | `queueArgs` | RabbitMQ queue arguments | `undefined` |
 | `maxMessageBytes` | Maximum serialized event size | `undefined` |
 | `deadLetter` | Built-in DLQ helper | `undefined` |
-| `amqp` | Native amqplib options | `undefined` |
+| `amqp` | Native AMQP options | `undefined` |
 
 ---
 
@@ -271,7 +271,7 @@ With `topologyMode: "plan-only"`, Rabbit Relay records them in the topology plan
 
 ---
 
-## Native amqplib options
+## Native AMQP options
 
 Use `amqp` when you need RabbitMQ-specific options not directly modeled by Rabbit Relay.
 
@@ -292,7 +292,7 @@ const sub = await broker
   });
 ```
 
-See [amqplib Escape Hatch](/features/amqplib-escape-hatch).
+See [AMQP Escape Hatch](/features/amqplib-escape-hatch).
 
 ---
 

@@ -53,8 +53,8 @@ There are two layers of flow control working together.
 
 ### 2. Publisher-side backpressure
 
-- when RabbitMQ's socket buffer fills, `channel.publish()` returns `false`
-- Rabbit Relay waits for the `drain` event
+- every publish is awaited until the bytes have been flushed to the socket
+- with `publisherConfirms`, the publish also waits for the broker's ack
 - publisher pauses safely instead of flooding memory
 
 ---

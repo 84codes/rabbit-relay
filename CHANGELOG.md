@@ -8,6 +8,16 @@ This project follows semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** Replaced `amqplib` with [`amqp-client.js`](https://github.com/cloudamqp/amqp-client.js) (`@cloudamqp/amqp-client`) as the AMQP transport. `amqplib` and `@types/amqplib` are no longer dependencies.
+- **Breaking:** `withChannel()` now hands out an `AMQPChannel` from amqp-client.js instead of an amqplib `Channel`. The AMQP operations are the same, under their protocol names: `assertQueue` -> `queueDeclare`, `assertExchange` -> `exchangeDeclare`, `bindQueue` -> `queueBind`, `consume` -> `basicConsume`, `publish` -> `basicPublish`, `get` -> `basicGet`, `prefetch` -> `basicQos`, and `checkQueue(q)` -> `queueDeclare(q, { passive: true })`. Channels are not `EventEmitter`s; they expose an `onerror` callback and a `closed` flag.
+- `amqp.publish.timestamp` now accepts a `Date` as well as epoch seconds. The wire encoding is unchanged. On the consuming side, a raw `AMQPMessage.properties.timestamp` is a `Date`.
+- The `amqp.*` passthrough options are now Rabbit Relay's own types (`AmqpQueueOptions`, `AmqpExchangeOptions`, `AmqpPublishOptions`, `AmqpConsumeOptions`), exported from the package root. Field names are unchanged, including the `x-*` shorthands (`messageTtl`, `expires`, `deadLetterExchange`, `maxLength`, `maxPriority`, `alternateExchange`) and `persistent`, `mandatory`, and consume `priority`.
+- Publisher backpressure no longer polls for a `drain` event. Every publish awaits the socket flush directly, and awaits the broker ack as well when `publisherConfirms` is on.
+- Recovery from an application-initiated `channel.close()` is now lazy: the channel reopens on next use rather than immediately. A consumer whose channel goes away still triggers eager reconnect and re-registration.
+- Added `@types/node` as an explicit dev dependency. It was previously pulled in only transitively through `@types/amqplib`.
+
 ## [1.6.0] - 2026-08-27
 
 ### Documentation

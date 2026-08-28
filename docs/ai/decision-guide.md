@@ -341,7 +341,7 @@ Use `request<TReply>()` for RPC.
 
 ---
 
-## Should I use native amqplib options?
+## Should I use native AMQP options?
 
 Use Rabbit Relay defaults first.
 

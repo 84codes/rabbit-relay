@@ -99,7 +99,7 @@ await pub.produce(orderCreated({ orderId: "O-42", total: 99.5 }));
 
 ## Why Rabbit Relay?
 
-[`amqplib`](https://github.com/amqp-node/amqplib) provides the essential AMQP primitives for Node.js. Production services commonly need an application layer around those primitives for recovery, typed contracts, retry policies, shutdown coordination, topology ownership, and observability.
+[`amqp-client.js`](https://github.com/cloudamqp/amqp-client.js) provides the essential AMQP primitives for Node.js. Production services commonly need an application layer around those primitives for recovery, typed contracts, retry policies, shutdown coordination, topology ownership, and observability.
 
 Rabbit Relay provides that layer while keeping RabbitMQ concepts explicit:
 
@@ -112,11 +112,11 @@ Rabbit Relay provides that layer while keeping RabbitMQ concepts explicit:
 - **RPC** with correlation IDs, reply queues, and timeouts
 - **Topology ownership modes** for application-owned, infrastructure-owned, or plan-only workflows
 - **Operational visibility** through health state, lifecycle events, and OpenTelemetry
-- **Native AMQP escape hatches** when direct `amqplib` access is needed
+- **Native AMQP escape hatches** when direct channel access is needed
 
 | Need | Recommended approach |
 |---|---|
-| A few simple publishes or consumers with full low-level control | Use `amqplib` directly |
+| A few simple publishes or consumers with full low-level control | Use `amqp-client.js` directly |
 | TypeScript-first messaging with reusable reliability conventions | Use Rabbit Relay |
 | RabbitMQ Streams workloads | Use the RabbitMQ Streams client |
 | A heavily configuration-driven enterprise messaging framework | Evaluate Rascal |

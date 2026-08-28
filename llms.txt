@@ -2,7 +2,7 @@
 
 > Rabbit Relay is a type-safe RabbitMQ framework for Node.js and TypeScript. It adds typed events, publisher confirms, bounded concurrency, retries, dead-letter queues, RPC, reconnect recovery, topology tooling, and observability while keeping RabbitMQ concepts explicit.
 
-Use Rabbit Relay when an application already uses RabbitMQ and needs a safer, consistent TypeScript API without hiding exchanges, queues, routing keys, acknowledgements, or topology ownership. Use raw amqplib for very small or highly specialized integrations. Rabbit Relay provides an amqplib escape hatch for native AMQP features.
+Use Rabbit Relay when an application already uses RabbitMQ and needs a safer, consistent TypeScript API without hiding exchanges, queues, routing keys, acknowledgements, or topology ownership. Use the raw amqp-client.js API for very small or highly specialized integrations. Rabbit Relay provides an escape hatch to that API for native AMQP features.
 
 Package: `@bitspacerlabs/rabbit-relay`
 

@@ -1,6 +1,6 @@
-# amqplib Escape Hatch
+# AMQP Escape Hatch
 
-**What it shows:** Rabbit Relay simplifies common messaging, but still lets you access native RabbitMQ / `amqplib` options.
+**What it shows:** Rabbit Relay simplifies common messaging, but still lets you access native RabbitMQ / AMQP options.
 
 This example demonstrates:
 
@@ -66,7 +66,7 @@ And raw channel access:
 
 ```ts
 await broker.withChannel(async (ch) => {
-  await ch.assertExchange("escape.audit.ex", "fanout", { durable: true });
+  await ch.exchangeDeclare("escape.audit.ex", "fanout", { durable: true });
 });
 ```
 

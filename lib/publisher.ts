@@ -1,4 +1,5 @@
-import { Channel, ConfirmChannel, Options } from "amqplib";
+import { AMQPChannel } from "@cloudamqp/amqp-client";
+import { AmqpPublishOptions, toProperties } from "./amqpOptions.js";
 import { pluginManager } from "./pluginManager.js";
 import { EventEnvelope, EventMeta } from "./eventFactories.js";
 import {
@@ -7,7 +8,6 @@ import {
   PublishOptions,
   RequestOptions,
 } from "./types.js";
-import { publishWithBackpressure, PublishChannel } from "./backpressure.js";
 import { generateUuid } from "./uuid.js";
 import { MessageTooLargeError } from "./errors.js";
 import { LifecycleEmit } from "./lifecycle.js";
@@ -15,7 +15,7 @@ import { LifecycleEmit } from "./lifecycle.js";
 function buildPublishProps(
   event: EventEnvelope,
   opts?: PublishOptions
-): Options.Publish {
+): AmqpPublishOptions {
   const nativePublish = opts?.amqp?.publish ?? {};
   const baseHeaders = event.meta?.headers ?? {};
   const nativeHeaders = nativePublish.headers ?? {};
@@ -23,7 +23,7 @@ function buildPublishProps(
   return {
     messageId: event.id,
     type: event.name,
-    timestamp: Math.floor((event.time ?? Date.now()) / 1000),
+    timestamp: new Date(event.time ?? Date.now()),
     correlationId: event.meta?.corrId,
     ...nativePublish,
     headers: { ...baseHeaders, ...nativeHeaders },
@@ -35,7 +35,7 @@ function buildRpcPublishProps(
   correlationId: string,
   replyTo: string,
   opts?: PublishOptions
-): Options.Publish {
+): AmqpPublishOptions {
   const nativePublish = opts?.amqp?.publish ?? {};
   const baseHeaders = event.meta?.headers ?? {};
   const nativeHeaders = nativePublish.headers ?? {};
@@ -43,7 +43,7 @@ function buildRpcPublishProps(
   return {
     messageId: event.id,
     type: event.name,
-    timestamp: Math.floor((event.time ?? Date.now()) / 1000),
+    timestamp: new Date(event.time ?? Date.now()),
     correlationId,
     replyTo,
     ...nativePublish,
@@ -76,8 +76,8 @@ export function createPublisher(params: {
   exchangeName: string;
   exchangeConfig: ExchangeConfig;
   defaultCfg: InternalCfg;
-  getChannel: () => Promise<Channel>;
-  getConfirmChannel: () => Promise<ConfirmChannel>;
+  getChannel: () => Promise<AMQPChannel>;
+  getConfirmChannel: () => Promise<AMQPChannel>;
   getBackoffMs: () => number;
   emitLifecycle: LifecycleEmit;
 }) {
@@ -132,7 +132,7 @@ export function createPublisher(params: {
     return content;
   };
 
-  const getPubChannel = async (): Promise<PublishChannel> => {
+  const getPubChannel = async (): Promise<AMQPChannel> => {
     if (exchangeConfig.publisherConfirms ?? defaultCfg.publisherConfirms) {
       return getConfirmChannel();
     }
@@ -141,7 +141,7 @@ export function createPublisher(params: {
   };
 
   const safePublish = async (
-    publish: (ch: PublishChannel) => unknown | Promise<unknown>
+    publish: (ch: AMQPChannel) => unknown | Promise<unknown>
   ) => {
     try {
       const ch = await getPubChannel();
@@ -169,12 +169,12 @@ export function createPublisher(params: {
       await safePublish((ch) => {
         const props = buildPublishProps(evt, opts);
 
-        return publishWithBackpressure(
-          ch,
+        return ch.basicPublish(
           exchangeName,
           routingKey,
           content,
-          props
+          toProperties(props),
+          props.mandatory
         );
       });
     } catch (err) {
@@ -199,7 +199,7 @@ export function createPublisher(params: {
     const correlationId = generateUuid();
 
     const rpcCh = await getChannel();
-    const temp = await rpcCh.assertQueue("", {
+    const temp = await rpcCh.queueDeclare("", {
       exclusive: true,
       autoDelete: true,
     });
@@ -211,14 +211,14 @@ export function createPublisher(params: {
 
     try {
       await safePublish(async (pubCh) => {
-        const props = buildRpcPublishProps(evt, correlationId, temp.queue, opts);
+        const props = buildRpcPublishProps(evt, correlationId, temp.name, opts);
 
-        await publishWithBackpressure(
-          pubCh,
+        await pubCh.basicPublish(
           exchangeName,
           routingKey,
           content,
-          props
+          toProperties(props),
+          props.mandatory
         );
       });
     } catch (err) {
@@ -241,11 +241,11 @@ export function createPublisher(params: {
 
       const cleanup = async () => {
         try {
-          if (ctag) await rpcCh.cancel(ctag);
+          if (ctag) await rpcCh.basicCancel(ctag);
         } catch {}
 
         try {
-          await rpcCh.deleteQueue(temp.queue);
+          await rpcCh.queueDelete(temp.name);
         } catch {}
       };
 
@@ -258,10 +258,10 @@ export function createPublisher(params: {
       }, timeoutMs);
 
       rpcCh
-        .consume(
-          temp.queue,
+        .basicConsume(
+          temp.name,
+          { noAck: true },
           (msg) => {
-            if (!msg) return;
             if (msg.properties.correlationId !== correlationId) return;
             if (settled) return;
 
@@ -269,7 +269,7 @@ export function createPublisher(params: {
             clearTimeout(timer);
 
             try {
-              const reply = JSON.parse(msg.content.toString()).reply;
+              const reply = JSON.parse(msg.bodyToString() ?? "null").reply;
               void pluginManager.executeHook("afterProduce", evt, reply);
               resolve(reply);
             } catch (err) {
@@ -277,11 +277,10 @@ export function createPublisher(params: {
             } finally {
               void cleanup();
             }
-          },
-          { noAck: true }
+          }
         )
-        .then((ok) => {
-          ctag = ok.consumerTag;
+        .then((consumer) => {
+          ctag = consumer.tag;
         })
         .catch((err) => {
           if (settled) return;

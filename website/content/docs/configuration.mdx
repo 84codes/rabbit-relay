@@ -105,7 +105,7 @@ Every `.exchange()` call accepts these overrides on top of broker defaults:
     },
     amqp: {
       type: 'object',
-      description: 'Native amqplib escape hatch (assert options passthrough).',
+      description: 'Native AMQP escape hatch (assert options passthrough).',
     },
   }}
 />
@@ -257,7 +257,7 @@ With `topologyMode: "passive"`, Rabbit Relay checks the configured DLX/DLQ
 exist instead of declaring them. With `topologyMode: "plan-only"`, Rabbit
 Relay records them in the topology plan without setup calls.
 
-## Native amqplib options
+## Native AMQP options
 
 Use `amqp` when you need RabbitMQ-specific options not directly modeled by
 Rabbit Relay.

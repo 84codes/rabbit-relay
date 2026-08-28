@@ -61,26 +61,26 @@ function readJSON(path) {
 }
 
 async function connect(url) {
-  let amqplib;
+  let AMQPClient;
   try {
-    amqplib = await import("amqplib");
+    ({ AMQPClient } = await import("@cloudamqp/amqp-client"));
   } catch {
-    error("amqplib is required. Run: npm install amqplib");
+    error("@cloudamqp/amqp-client is required. Run: npm install @cloudamqp/amqp-client");
   }
   const resolved = url || process.env.RABBITMQ_URL || "amqp://localhost";
-  let conn;
+  const conn = new AMQPClient(resolved);
+  conn.onerror = () => {};
   try {
-    conn = await amqplib.connect(resolved);
+    await conn.connect();
   } catch (err) {
     error(`cannot connect to RabbitMQ at '${resolved}': ${err.message}`);
   }
-  conn.on("error", () => {});
   return conn;
 }
 
 async function getChannel(conn) {
-  const ch = await conn.createChannel();
-  ch.on("error", () => {});
+  const ch = await conn.channel();
+  ch.onerror = () => {};
   return ch;
 }
 
@@ -117,20 +117,21 @@ function formatHeaderValue(v) {
 
 function formatMessage(msg) {
   const fields = {
-    deliveryTag: msg.fields.deliveryTag,
-    routingKey: msg.fields.routingKey,
-    exchange: msg.fields.exchange,
-    redelivered: msg.fields.redelivered,
+    deliveryTag: msg.deliveryTag,
+    routingKey: msg.routingKey,
+    exchange: msg.exchange,
+    redelivered: msg.redelivered,
   };
   const props = {};
   for (const [k, v] of Object.entries(msg.properties)) {
     if (v != null && k !== "headers") props[k] = v;
   }
+  const raw = msg.bodyToString() ?? "";
   let body;
   try {
-    body = JSON.parse(msg.content.toString());
+    body = JSON.parse(raw);
   } catch {
-    body = msg.content.toString();
+    body = raw;
   }
   return { fields, properties: props, headers: msg.properties.headers, body };
 }
@@ -257,11 +258,9 @@ async function cmdValidate(planPath, amqpUrl) {
     let ch;
     try {
       ch = await getChannel(conn);
-      await ch.checkExchange(name);
+      await ch.exchangeDeclare(name, "topic", { passive: true });
     } catch (err) {
-      const code = err && (err.code ?? err?.constructor?.name);
-      const is404 =
-        code === 404 || String(err.message ?? "").includes("404");
+      const is404 = /\(404\)\s*$/.test(String(err.message ?? ""));
       issues.push({
         type: is404 ? "missing_exchange" : "validation_error",
         exchange: name,
@@ -279,11 +278,9 @@ async function cmdValidate(planPath, amqpUrl) {
     let ch;
     try {
       ch = await getChannel(conn);
-      await ch.checkQueue(name);
+      await ch.queueDeclare(name, { passive: true });
     } catch (err) {
-      const code = err && (err.code ?? err?.constructor?.name);
-      const is404 =
-        code === 404 || String(err.message ?? "").includes("404");
+      const is404 = /\(404\)\s*$/.test(String(err.message ?? ""));
       issues.push({
         type: is404 ? "missing_queue" : "validation_error",
         queue: name,
@@ -382,18 +379,26 @@ async function cmdDlqInspect(queue, amqpUrl) {
 
   let info;
   try {
-    info = await ch.checkQueue(queue);
+    info = await ch.queueDeclare(queue, { passive: true });
   } catch (err) {
-    const is404 =
-      (err.code ?? err?.constructor?.name) === 404 ||
-      String(err.message ?? "").includes("404");
+    const is404 = /\(404\)\s*$/.test(String(err.message ?? ""));
     error(is404 ? `Queue '${queue}' not found` : `Queue check failed: ${err.message}`);
   }
 
   await ch.close();
   await conn.close();
 
-  console.log(JSON.stringify({ queue, ...info }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        queue,
+        messageCount: info.messageCount,
+        consumerCount: info.consumerCount,
+      },
+      null,
+      2
+    )
+  );
 }
 
 async function cmdDlqPeek(queue, limit, amqpUrl) {
@@ -402,11 +407,9 @@ async function cmdDlqPeek(queue, limit, amqpUrl) {
 
   let info;
   try {
-    info = await ch.checkQueue(queue);
+    info = await ch.queueDeclare(queue, { passive: true });
   } catch (err) {
-    const is404 =
-      (err.code ?? err?.constructor?.name) === 404 ||
-      String(err.message ?? "").includes("404");
+    const is404 = /\(404\)\s*$/.test(String(err.message ?? ""));
     error(is404 ? `Queue '${queue}' not found` : `Queue check failed: ${err.message}`);
   }
 
@@ -423,7 +426,7 @@ async function cmdDlqPeek(queue, limit, amqpUrl) {
   const messages = [];
 
   for (let i = 0; i < count; i++) {
-    const msg = await ch.get(queue, { noAck: false });
+    const msg = await ch.basicGet(queue, { noAck: false });
     if (!msg) break;
     messages.push(msg);
   }
