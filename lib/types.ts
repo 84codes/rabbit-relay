@@ -1,4 +1,11 @@
-import { Channel, Options } from "amqplib";
+import { AMQPChannel } from "@cloudamqp/amqp-client";
+import {
+  AmqpArguments,
+  AmqpConsumeOptions,
+  AmqpExchangeOptions,
+  AmqpPublishOptions,
+  AmqpQueueOptions,
+} from "./amqpOptions.js";
 import { EventEnvelope } from "./eventFactories.js";
 import { Dedupe, DedupeOpts } from "./utils/dedupe.js";
 import { LifecycleEventName, LifecycleHandler } from "./lifecycle.js";
@@ -42,11 +49,11 @@ export type RetryBackoff = "fixed" | "exponential";
 export type ErrorAction = "ack" | "requeue" | "dead-letter" | "retry";
 
 export interface AmqpPassthroughOptions {
-  queue?: Options.AssertQueue;
-  exchange?: Options.AssertExchange;
-  bind?: Record<string, unknown>;
-  publish?: Options.Publish;
-  consume?: Options.Consume;
+  queue?: AmqpQueueOptions;
+  exchange?: AmqpExchangeOptions;
+  bind?: AmqpArguments;
+  publish?: AmqpPublishOptions;
+  consume?: AmqpConsumeOptions;
 }
 
 export interface QueueConfig {
@@ -91,19 +98,19 @@ export interface DeadLetterConfig {
   autoDeclare?: boolean;
 
   /**
-   * Native amqplib options for declaring the DLX.
+   * Native AMQP options for declaring the DLX.
    */
-  exchangeOptions?: Options.AssertExchange;
+  exchangeOptions?: AmqpExchangeOptions;
 
   /**
-   * Native amqplib options for declaring the DLQ.
+   * Native AMQP options for declaring the DLQ.
    */
-  queueOptions?: Options.AssertQueue;
+  queueOptions?: AmqpQueueOptions;
 
   /**
-   * Native amqplib binding arguments for DLQ binding.
+   * Native AMQP binding arguments for DLQ binding.
    */
-  bindArguments?: Record<string, unknown>;
+  bindArguments?: AmqpArguments;
 }
 
 export interface ExchangeConfig {
@@ -124,7 +131,7 @@ export interface ExchangeConfig {
    */
   binding?: boolean;
 
-  queueArgs?: Options.AssertQueue["arguments"];
+  queueArgs?: AmqpArguments;
 
   /**
    * Topology behavior for this exchange binding.
@@ -157,7 +164,7 @@ export interface ExchangeConfig {
   deadLetter?: DeadLetterConfig;
 
   /**
-   * Escape hatch for native amqplib options.
+   * Escape hatch for native AMQP options.
    * Rabbit Relay keeps safe defaults, while advanced users can pass raw AMQP options.
    */
   amqp?: Pick<AmqpPassthroughOptions, "exchange" | "queue" | "bind">;
@@ -184,7 +191,7 @@ export interface PublishOptions {
    */
   maxMessageBytes?: number;
 
-  /** Native amqplib publish options. */
+  /** Native AMQP publish options. */
   amqp?: Pick<AmqpPassthroughOptions, "publish">;
 }
 
@@ -294,7 +301,7 @@ export interface ConsumeOptions {
    */
   dedupe?: ConsumeDedupeOptions;
 
-  /** Native amqplib consume options. */
+  /** Native AMQP consume options. */
   amqp?: Pick<AmqpPassthroughOptions, "consume">;
 }
 
@@ -447,7 +454,7 @@ export interface BrokerInterface<TEvents extends Record<string, EventEnvelope>> 
 
   /**
    * Publish one event with per-message options.
-   * Use this when you need native amqplib publish options like persistent, priority, expiration, etc.
+   * Use this when you need native AMQP publish options like persistent, priority, expiration, etc.
    */
   publish<K extends keyof TEvents>(
     event: TEvents[K],
@@ -465,8 +472,8 @@ export interface BrokerInterface<TEvents extends Record<string, EventEnvelope>> 
     opts?: RequestOptions
   ): Promise<TReply>;
 
-  /** Escape hatch for advanced amqplib usage. */
-  withChannel<T>(fn: (channel: Channel) => Promise<T> | T): Promise<T>;
+  /** Escape hatch for advanced amqp-client.js usage. */
+  withChannel<T>(fn: (channel: AMQPChannel) => Promise<T> | T): Promise<T>;
 
   health(): Promise<BrokerHealth>;
 
@@ -484,7 +491,7 @@ export type InternalCfg = {
   durable: boolean;
   publisherConfirms: boolean;
   binding: boolean;
-  queueArgs?: Options.AssertQueue["arguments"];
+  queueArgs?: AmqpArguments;
   topologyMode: TopologyMode;
   maxMessageBytes?: number;
   passiveQueue: boolean;

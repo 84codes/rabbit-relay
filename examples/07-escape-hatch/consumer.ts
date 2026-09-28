@@ -15,7 +15,7 @@ type Payload = {
         queue: {
           durable: true,
           arguments: {
-            // Native RabbitMQ queue argument passed through amqplib.
+            // Native RabbitMQ queue argument passed straight through.
             "x-message-ttl": 60_000,
           },
         },

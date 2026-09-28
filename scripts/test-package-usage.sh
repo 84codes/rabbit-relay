@@ -345,13 +345,15 @@ if (
   throw new Error("mergeTopologyPlans did not deduplicate topology");
 }
 
-const missingError = Object.assign(new Error("not found"), { code: 404 });
+const missingError = new Error(
+  "channel 1 closed: NOT_FOUND - no queue 'test.q' in vhost '/' (404)"
+);
 const validation = await validateTopologyPlan(
   {
-    async checkExchange() {
+    async exchangeDeclare() {
       return undefined;
     },
-    async checkQueue() {
+    async queueDeclare() {
       throw missingError;
     },
   },
@@ -367,28 +369,30 @@ if (
 
 let acked = 0;
 const redriveMessage = {
-  content: Buffer.from("payload"),
-  fields: { routingKey: "original.key" },
+  body: Buffer.from("payload"),
+  routingKey: "original.key",
   properties: { headers: { "x-rabbit-relay-redrive-count": 1 } },
+  async ack() {
+    acked++;
+  },
+  async nack() {
+    throw new Error("redrive should not have nacked");
+  },
 };
 const redriveResult = await redriveDlq(
   {
-    async checkQueue() {
-      return { messageCount: 1 };
+    async queueDeclare() {
+      return { name: "test.dlq", messageCount: 1, consumerCount: 0 };
     },
-    async get() {
+    async basicGet() {
       return redriveMessage;
     },
-    publish(_exchange, routingKey, _content, options) {
+    async basicPublish(_exchange, routingKey, _body, properties) {
       if (routingKey !== "original.key") throw new Error("routing key was not preserved");
-      if (options.headers["x-rabbit-relay-redrive-count"] !== 2) {
+      if (properties.headers["x-rabbit-relay-redrive-count"] !== 2) {
         throw new Error("redrive count was not incremented");
       }
-      return true;
-    },
-    ack(message) {
-      if (message !== redriveMessage) throw new Error("wrong message ACKed");
-      acked++;
+      return 1;
     },
   },
   {
@@ -403,8 +407,8 @@ if (redriveResult.republished !== 1 || redriveResult.acked !== 1 || acked !== 1)
 
 await redriveDlq(
   {
-    async checkQueue() {
-      return { messageCount: 4 };
+    async queueDeclare() {
+      return { name: "test.dlq", messageCount: 4, consumerCount: 0 };
     },
   },
   {

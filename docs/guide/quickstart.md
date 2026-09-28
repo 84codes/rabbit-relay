@@ -353,4 +353,4 @@ process.on("SIGTERM", async () => {
 - `withHeaders()`, `withCorrelation()`, and `traceFrom()` help with metadata
 - retry + delayed retry + DLQ gives safer production failure handling
 - lifecycle hooks, topology planning, validation, and DLQ redrive help operations
-- native `amqplib` options remain available when needed
+- native AMQP options remain available when needed

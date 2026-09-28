@@ -58,7 +58,7 @@ binding_not_validated
 
 This is expected.
 
-AMQP passive checks can safely check whether exchanges and queues exist, but RabbitMQ does not expose a simple passive binding check through `amqplib`.
+AMQP passive checks can safely check whether exchanges and queues exist, but RabbitMQ does not expose a simple passive binding check.
 
 ---
 

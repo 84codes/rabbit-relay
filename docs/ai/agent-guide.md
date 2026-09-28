@@ -430,7 +430,7 @@ if (!result.valid) {
 }
 ```
 
-Remember: binding validation is informational because AMQP does not expose a simple safe binding check through `amqplib`.
+Remember: binding validation is informational because AMQP does not expose a simple safe binding check.
 
 ---
 

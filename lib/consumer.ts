@@ -1,5 +1,11 @@
-import { Channel, ConsumeMessage, Options } from "amqplib";
+import { AMQPChannel, AMQPConsumer, AMQPMessage } from "@cloudamqp/amqp-client";
 import { AsyncLocalStorage } from "node:async_hooks";
+import {
+  AmqpArguments,
+  AmqpPublishOptions,
+  toConsumeParams,
+  toProperties,
+} from "./amqpOptions.js";
 import { pluginManager } from "./pluginManager.js";
 import { EventEnvelope, getEventSchema } from "./eventFactories.js";
 import { SchemaValidationError } from "./errors.js";
@@ -14,7 +20,6 @@ import {
   RetryThenAction,
   TopologyMode,
 } from "./types.js";
-import { publishWithBackpressure } from "./backpressure.js";
 import { Dedupe, DedupeOpts, makeMemoryDedupe } from "./utils/dedupe.js";
 import { LifecycleEmit } from "./lifecycle.js";
 
@@ -50,6 +55,7 @@ export function createConsumer(params: {
   middlewares: ConsumeMiddleware[];
   emitLifecycle: LifecycleEmit;
   shutdownTimeoutMs: number;
+  requestRecovery: (reason: string) => void;
 }) {
   const {
     peerName,
@@ -60,11 +66,12 @@ export function createConsumer(params: {
     middlewares,
     emitLifecycle,
     shutdownTimeoutMs,
+    requestRecovery,
   } = params;
 
   let consumerTag: string | undefined;
   let isConsuming = false;
-  let consumeCh: Channel | null = null;
+  let consumeCh: AMQPChannel | null = null;
 
   let prefetchCount = 1;
   let concurrency = 1;
@@ -79,10 +86,15 @@ export function createConsumer(params: {
   let dedupe: Dedupe | undefined;
   let invalidMessagePolicy: InvalidMessagePolicy | undefined;
 
-  const pendingMessages: ConsumeMessage[] = [];
+  const pendingMessages: AMQPMessage[] = [];
   let activeHandlers = 0;
   let stopping = false;
   const drainWaiters = new Set<() => void>();
+
+  /** Requeue a message we never handed to a handler; a dead channel is not news. */
+  function requeueQuietly(msg: AMQPMessage): void {
+    void msg.nack(true).catch(() => undefined);
+  }
 
   function notifyDrained(): void {
     if (activeHandlers !== 0) return;
@@ -180,18 +192,13 @@ export function createConsumer(params: {
     return `${queueName}.retry.${retryDelayMs}.queue`;
   }
 
-  function getRetryCount(msg: ConsumeMessage): number {
+  function getRetryCount(msg: AMQPMessage): number {
     const raw = msg.properties.headers?.[RETRY_COUNT_HEADER];
 
     if (typeof raw === "number") return raw;
 
     if (typeof raw === "string") {
       const parsed = Number(raw);
-      return Number.isFinite(parsed) ? parsed : 0;
-    }
-
-    if (Buffer.isBuffer(raw)) {
-      const parsed = Number(raw.toString());
       return Number.isFinite(parsed) ? parsed : 0;
     }
 
@@ -210,9 +217,9 @@ export function createConsumer(params: {
   }
 
   function buildRetryHeaders(
-    msg: ConsumeMessage,
+    msg: AMQPMessage,
     err: unknown
-  ): Record<string, unknown> {
+  ): AmqpArguments {
     const now = new Date().toISOString();
     const retryCount = getRetryCount(msg);
     const errorMessage = getErrorMessage(err);
@@ -233,7 +240,7 @@ export function createConsumer(params: {
 
   function hydrateEventMetaFromMessage(
     event: EventEnvelope,
-    msg: ConsumeMessage
+    msg: AMQPMessage
   ): EventEnvelope {
     const headers = msg.properties.headers ?? {};
 
@@ -252,10 +259,10 @@ export function createConsumer(params: {
   }
 
   function buildRetryPublishOptions(
-    msg: ConsumeMessage,
+    msg: AMQPMessage,
     err: unknown,
     opts: { preserveExpiration: boolean }
-  ): Options.Publish {
+  ): AmqpPublishOptions {
     return {
       contentType: msg.properties.contentType,
       contentEncoding: msg.properties.contentEncoding,
@@ -272,7 +279,7 @@ export function createConsumer(params: {
     };
   }
 
-  async function assertDelayedRetryTopology(ch: Channel): Promise<void> {
+  async function assertDelayedRetryTopology(ch: AMQPChannel): Promise<void> {
     if (retryDelayMs == null) return;
 
     if (topologyMode === "plan-only") {
@@ -288,7 +295,7 @@ export function createConsumer(params: {
   }
 
   async function assertRetryParkingTopology(
-    ch: Channel,
+    ch: AMQPChannel,
     attempt: number
   ): Promise<void> {
     const retryExchange = getRetryExchangeName(attempt);
@@ -296,9 +303,9 @@ export function createConsumer(params: {
 
     if (topologyMode === "passive") {
       try {
-        await ch.checkExchange(retryExchange);
-        await ch.checkQueue(retryQueue);
-        await ch.bindQueue(retryQueue, retryExchange, "#");
+        await ch.exchangeDeclare(retryExchange, "topic", { passive: true });
+        await ch.queueDeclare(retryQueue, { passive: true });
+        await ch.queueBind(retryQueue, retryExchange, "#");
       } catch (err) {
         throw new Error(
           `[broker] topologyMode='passive' delayed retry topology check failed for ` +
@@ -309,23 +316,22 @@ export function createConsumer(params: {
       return;
     }
 
-    await ch.assertExchange(retryExchange, "topic", {
-      durable: true,
-    });
+    await ch.exchangeDeclare(retryExchange, "topic", { durable: true });
 
-    await ch.assertQueue(retryQueue, {
-      durable: true,
-      arguments: {
+    await ch.queueDeclare(
+      retryQueue,
+      { durable: true },
+      {
         "x-message-ttl": retryDelayForAttempt(attempt),
         "x-dead-letter-exchange": exchangeName,
-      },
-    });
+      }
+    );
 
-    await ch.bindQueue(retryQueue, retryExchange, "#");
+    await ch.queueBind(retryQueue, retryExchange, "#");
   }
 
   async function republishForImmediateRetry(
-    msg: ConsumeMessage,
+    msg: AMQPMessage,
     err: unknown
   ): Promise<void> {
     const ch = consumeCh;
@@ -336,17 +342,16 @@ export function createConsumer(params: {
       );
     }
 
-    await publishWithBackpressure(
-      ch,
-      msg.fields.exchange,
-      msg.fields.routingKey,
-      msg.content,
-      buildRetryPublishOptions(msg, err, { preserveExpiration: true })
+    await ch.basicPublish(
+      msg.exchange,
+      msg.routingKey,
+      msg.body,
+      toProperties(buildRetryPublishOptions(msg, err, { preserveExpiration: true }))
     );
   }
 
   async function republishForDelayedRetry(
-    msg: ConsumeMessage,
+    msg: AMQPMessage,
     err: unknown
   ): Promise<void> {
     const ch = consumeCh;
@@ -362,17 +367,16 @@ export function createConsumer(params: {
 
     await assertRetryParkingTopology(ch, nextAttempt);
 
-    await publishWithBackpressure(
-      ch,
+    await ch.basicPublish(
       retryExchange,
-      msg.fields.routingKey,
-      msg.content,
-      buildRetryPublishOptions(msg, err, { preserveExpiration: false })
+      msg.routingKey,
+      msg.body,
+      toProperties(buildRetryPublishOptions(msg, err, { preserveExpiration: false }))
     );
   }
 
   async function republishForRetry(
-    msg: ConsumeMessage,
+    msg: AMQPMessage,
     err: unknown
   ): Promise<void> {
     if (retryDelayMs != null) {
@@ -383,9 +387,12 @@ export function createConsumer(params: {
     await republishForImmediateRetry(msg, err);
   }
 
-  function applyFinalFailureAction(ch: Channel, msg: ConsumeMessage, payload?: EventEnvelope) {
+  async function applyFinalFailureAction(
+    msg: AMQPMessage,
+    payload?: EventEnvelope
+  ): Promise<void> {
     if (retryThen === "requeue") {
-      ch.nack(msg, false, true);
+      await msg.nack(true);
       return;
     }
 
@@ -393,43 +400,42 @@ export function createConsumer(params: {
       emitLifecycle("message.dead-lettered", {
         peerName,
         queue: queueName,
-        exchange: msg.fields.exchange,
-        routingKey: msg.fields.routingKey,
+        exchange: msg.exchange,
+        routingKey: msg.routingKey,
         eventName: payload?.name ?? "unknown",
         reason: "retry attempts exhausted",
       }).catch(() => {});
-      ch.nack(msg, false, false);
+      await msg.nack(false);
       return;
     }
 
     emitLifecycle("message.dropped", {
       peerName,
       queue: queueName,
-      exchange: msg.fields.exchange,
-      routingKey: msg.fields.routingKey,
+      exchange: msg.exchange,
+      routingKey: msg.routingKey,
       eventName: payload?.name ?? "unknown",
       reason: "retry attempts exhausted, retry.then=ack",
     }).catch(() => {});
-    ch.ack(msg);
+    await msg.ack();
   }
 
-  function ackOrNackParseFailure(ch: Channel, msg: ConsumeMessage) {
+  async function ackOrNackParseFailure(msg: AMQPMessage): Promise<void> {
     if (onError === "requeue") {
-      ch.nack(msg, false, true);
+      await msg.nack(true);
       return;
     }
 
     if (onError === "dead-letter" || onError === "retry") {
-      ch.nack(msg, false, false);
+      await msg.nack(false);
       return;
     }
 
-    ch.ack(msg);
+    await msg.ack();
   }
 
   async function applyInvalidMessagePolicy(
-    ch: Channel,
-    msg: ConsumeMessage,
+    msg: AMQPMessage,
     payload: EventEnvelope,
     error: Error
   ): Promise<void> {
@@ -437,15 +443,15 @@ export function createConsumer(params: {
 
     if (typeof policy === "function") {
       const ctx: InvalidMessageContext = {
-        id: msg.fields.deliveryTag,
+        id: msg.deliveryTag,
         event: payload,
         error,
         queue: queueName,
         ack: async () => {
-          try { ch.ack(msg); } catch { /* channel may be closed */ }
+          try { await msg.ack(); } catch { /* channel may be closed */ }
         },
         nack: async (requeue: boolean) => {
-          try { ch.nack(msg, false, requeue); } catch { /* channel may be closed */ }
+          try { await msg.nack(requeue); } catch { /* channel may be closed */ }
         },
       };
       await policy(ctx);
@@ -453,21 +459,20 @@ export function createConsumer(params: {
     }
 
     if (policy === "requeue") {
-      ch.nack(msg, false, true);
+      await msg.nack(true);
       return;
     }
 
     if (policy === "dead-letter") {
-      ch.nack(msg, false, false);
+      await msg.nack(false);
       return;
     }
 
-    ch.ack(msg);
+    await msg.ack();
   }
 
   async function handleFailure(
-    ch: Channel,
-    msg: ConsumeMessage,
+    msg: AMQPMessage,
     err: unknown,
     payload?: EventEnvelope
   ): Promise<void> {
@@ -483,8 +488,8 @@ export function createConsumer(params: {
           await emitLifecycle("retry.scheduled", {
             peerName,
             queue: queueName,
-            exchange: msg.fields.exchange,
-            routingKey: msg.fields.routingKey,
+            exchange: msg.exchange,
+            routingKey: msg.routingKey,
             retryCount: nextRetryCount,
             attempts: retryAttempts,
             ...(retryDelayMs != null
@@ -495,7 +500,7 @@ export function createConsumer(params: {
           });
 
           // ACK original only after retry copy is successfully published.
-          ch.ack(msg);
+          await msg.ack();
           return;
         } catch (retryErr) {
           console.error(`[peer=${peerName}, queue=${queueName}] Retry publish failed:`, retryErr);
@@ -506,26 +511,26 @@ export function createConsumer(params: {
             await emitLifecycle("message.dead-lettered", {
               peerName,
               queue: queueName,
-              exchange: msg.fields.exchange,
-              routingKey: msg.fields.routingKey,
+              exchange: msg.exchange,
+              routingKey: msg.routingKey,
               eventName: payload?.name ?? "unknown",
               reason: retryErr,
             });
-            ch.nack(msg, false, false);
+            await msg.nack(false);
           } else {
-            ch.nack(msg, false, true);
+            await msg.nack(true);
           }
 
           return;
         }
       }
 
-      applyFinalFailureAction(ch, msg, payload);
+      await applyFinalFailureAction(msg, payload);
       return;
     }
 
     if (onError === "requeue") {
-      ch.nack(msg, false, true);
+      await msg.nack(true);
       return;
     }
 
@@ -533,29 +538,29 @@ export function createConsumer(params: {
       await emitLifecycle("message.dead-lettered", {
         peerName,
         queue: queueName,
-        exchange: msg.fields.exchange,
-        routingKey: msg.fields.routingKey,
+        exchange: msg.exchange,
+        routingKey: msg.routingKey,
         eventName: payload?.name ?? "unknown",
         reason: err,
       });
-      ch.nack(msg, false, false);
+      await msg.nack(false);
       return;
     }
 
     await emitLifecycle("message.dropped", {
       peerName,
       queue: queueName,
-      exchange: msg.fields.exchange,
-      routingKey: msg.fields.routingKey,
+      exchange: msg.exchange,
+      routingKey: msg.routingKey,
       eventName: payload?.name ?? "unknown",
       reason: err,
     });
-    ch.ack(msg);
+    await msg.ack();
   }
 
   async function maybeReplyToRpc(
-    ch: Channel,
-    msg: ConsumeMessage,
+    ch: AMQPChannel,
+    msg: AMQPMessage,
     result: unknown,
     errored: boolean,
     shouldSkipReply: boolean
@@ -563,24 +568,23 @@ export function createConsumer(params: {
     if (!msg.properties.replyTo || shouldSkipReply) return;
 
     try {
-      await publishWithBackpressure(
-        ch,
+      await ch.basicPublish(
         "",
         msg.properties.replyTo,
         Buffer.from(JSON.stringify({ reply: errored ? null : result })),
-        { correlationId: msg.properties.correlationId }
+        toProperties({ correlationId: msg.properties.correlationId })
       );
     } catch (e) {
       console.error(`[peer=${peerName}, queue=${queueName}] Reply publish failed:`, e);
     }
   }
 
-  const processMessage = async (msg: ConsumeMessage) => {
+  const processMessage = async (msg: AMQPMessage) => {
     const ch = consumeCh;
 
     if (!ch) return;
 
-    const id = msg.fields.deliveryTag;
+    const id = msg.deliveryTag;
 
     let payload: EventEnvelope;
     let result: unknown = null;
@@ -588,13 +592,13 @@ export function createConsumer(params: {
     let errorValue: unknown = null;
 
     try {
-      payload = JSON.parse(msg.content.toString()) as EventEnvelope;
+      payload = JSON.parse(msg.bodyToString() ?? "") as EventEnvelope;
       payload = hydrateEventMetaFromMessage(payload, msg);
     } catch (err) {
       console.error(`[peer=${peerName}, queue=${queueName}] Invalid message payload:`, err);
 
       try {
-        ackOrNackParseFailure(ch, msg);
+        await ackOrNackParseFailure(msg);
       } catch (e) {
         console.error(`[peer=${peerName}, queue=${queueName}] Ack/Nack failed after parse failure:`, e);
       }
@@ -604,7 +608,7 @@ export function createConsumer(params: {
 
     if (dedupe && !dedupe.checkAndRemember(payload)) {
       try {
-        ch.ack(msg);
+        await msg.ack();
       } catch (e) {
         console.error(`[peer=${peerName}, queue=${queueName}] Ack duplicate failed:`, e);
       }
@@ -628,7 +632,7 @@ export function createConsumer(params: {
         console.error(validationError);
 
         try {
-          await applyInvalidMessagePolicy(ch, msg, payload, validationError);
+          await applyInvalidMessagePolicy(msg, payload, validationError);
         } catch (e) {
           console.error(`[peer=${peerName}, queue=${queueName}] Invalid message policy failed:`, e);
         }
@@ -702,9 +706,9 @@ export function createConsumer(params: {
 
     try {
       if (errored) {
-        await handleFailure(ch, msg, errorValue, payload);
+        await handleFailure(msg, errorValue, payload);
       } else {
-        ch.ack(msg);
+        await msg.ack();
       }
     } catch (e) {
       console.error(`[peer=${peerName}, queue=${queueName}] Ack/Nack failed after handler:`, e);
@@ -733,16 +737,9 @@ export function createConsumer(params: {
     }
   };
 
-  const onMessage = (msg: ConsumeMessage | null) => {
-    if (!msg) return;
-
+  const onMessage = (msg: AMQPMessage) => {
     if (stopping) {
-      try {
-        consumeCh?.nack(msg, false, true);
-      } catch {
-        // channel may be closed
-      }
-
+      requeueQuietly(msg);
       return;
     }
 
@@ -750,8 +747,23 @@ export function createConsumer(params: {
     processNext();
   };
 
+  /**
+   * A consumer stops delivering when its channel goes away. Only a
+   * broker-initiated close raises a channel error, so watch the consumer
+   * itself to also catch an application closing the channel underneath us.
+   */
+  function watchConsumer(consumer: AMQPConsumer): void {
+    void consumer
+      .wait()
+      .catch(() => undefined)
+      .then(() => {
+        if (!isConsuming || stopping) return;
+        requestRecovery(`consumer '${queueName}' stopped unexpectedly`);
+      });
+  }
+
   async function startConsume(
-    getChannel: () => Promise<Channel>,
+    getChannel: () => Promise<AMQPChannel>,
     opts?: ConsumeOptions
   ) {
     consumeOptions = opts;
@@ -822,16 +834,17 @@ export function createConsumer(params: {
 
     await assertDelayedRetryTopology(ch);
 
-    await ch.prefetch(prefetchCount, false);
+    await ch.basicQos(prefetchCount, 0, false);
 
-    const ok = await ch.consume(
+    const consumer = await ch.basicConsume(
       queueName,
-      onMessage,
-      opts?.amqp?.consume
+      toConsumeParams(opts?.amqp?.consume),
+      onMessage
     );
 
-    consumerTag = ok.consumerTag;
+    consumerTag = consumer.tag;
     isConsuming = true;
+    watchConsumer(consumer);
 
     await emitLifecycle("consumer.started", {
       peerName,
@@ -849,21 +862,15 @@ export function createConsumer(params: {
           const c = consumeCh;
 
           if (consumerTag && c) {
-            await c.cancel(consumerTag);
+            await c.basicCancel(consumerTag);
           }
         } catch {
           // channel may be closed, ignore
         }
 
-        const c = consumeCh;
         while (pendingMessages.length > 0) {
           const pending = pendingMessages.shift();
-          if (!pending || !c) continue;
-          try {
-            c.nack(pending, false, true);
-          } catch {
-            // channel may be closed
-          }
+          if (pending) requeueQuietly(pending);
         }
 
         if (!closing || !isCalledFromHandler()) {
@@ -878,23 +885,24 @@ export function createConsumer(params: {
     };
   }
 
-  async function resumeOnReconnect(ch: Channel) {
+  async function resumeOnReconnect(ch: AMQPChannel) {
     if (!isConsuming) return;
 
     await assertDelayedRetryTopology(ch);
 
-    await ch.prefetch(prefetchCount, false);
+    await ch.basicQos(prefetchCount, 0, false);
 
     consumeCh = ch;
     stopping = false;
 
-    const ok = await ch.consume(
+    const consumer = await ch.basicConsume(
       queueName,
-      onMessage,
-      consumeOptions?.amqp?.consume
+      toConsumeParams(consumeOptions?.amqp?.consume),
+      onMessage
     );
 
-    consumerTag = ok.consumerTag;
+    consumerTag = consumer.tag;
+    watchConsumer(consumer);
   }
 
   function getState() {

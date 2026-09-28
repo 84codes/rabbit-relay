@@ -1,4 +1,5 @@
-import { Channel } from "amqplib";
+import { AMQPChannel } from "@cloudamqp/amqp-client";
+import { amqpReplyCode } from "./amqpOptions.js";
 import { TopologyPlan } from "./topologyPlan.js";
 
 export type TopologyValidationIssueType =
@@ -19,20 +20,6 @@ export interface TopologyValidationIssue {
 export interface TopologyValidationResult {
   valid: boolean;
   issues: TopologyValidationIssue[];
-}
-
-function getErrorCode(err: unknown): number | undefined {
-  if (!err || typeof err !== "object") return undefined;
-
-  const maybe = err as {
-    code?: unknown;
-    replyCode?: unknown;
-  };
-
-  if (typeof maybe.code === "number") return maybe.code;
-  if (typeof maybe.replyCode === "number") return maybe.replyCode;
-
-  return undefined;
 }
 
 function getErrorMessage(err: unknown): string {
@@ -56,19 +43,21 @@ function getErrorMessage(err: unknown): string {
  * - does not modify bindings
  *
  * Binding validation is reported as informational because AMQP does not expose
- * a simple passive binding check through amqplib.
+ * a simple passive binding check.
  */
 export async function validateTopologyPlan(
-  channel: Channel,
+  channel: AMQPChannel,
   plan: TopologyPlan
 ): Promise<TopologyValidationResult> {
   const issues: TopologyValidationIssue[] = [];
 
   for (const exchange of plan.exchanges) {
     try {
-      await channel.checkExchange(exchange.name);
+      await channel.exchangeDeclare(exchange.name, exchange.type, {
+        passive: true,
+      });
     } catch (err) {
-      const code = getErrorCode(err);
+      const code = amqpReplyCode(err);
 
       if (code === 404) {
         issues.push({
@@ -90,9 +79,9 @@ export async function validateTopologyPlan(
 
   for (const queue of plan.queues) {
     try {
-      await channel.checkQueue(queue.name);
+      await channel.queueDeclare(queue.name, { passive: true });
     } catch (err) {
-      const code = getErrorCode(err);
+      const code = amqpReplyCode(err);
 
       if (code === 404) {
         issues.push({
@@ -121,7 +110,7 @@ export async function validateTopologyPlan(
       message:
         `Binding '${binding.queue}' -> '${binding.exchange}' with routing key ` +
         `'${binding.routingKey}' was included in the plan but not passively validated. ` +
-        `AMQP does not expose a safe binding check through amqplib.`,
+        `AMQP does not expose a safe binding check.`,
     });
   }
 

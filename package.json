@@ -58,7 +58,7 @@
   "keywords": [
     "rabbitmq",
     "rabbit-relay",
-    "amqplib",
+    "amqp-client",
     "amqp",
     "typescript",
     "events",
@@ -83,10 +83,10 @@
   "homepage": "https://bitspacerlabs.github.io/rabbit-relay/docs/",
   "license": "MIT",
   "dependencies": {
-    "amqplib": "^0.10.5"
+    "@cloudamqp/amqp-client": "^4.1.1"
   },
   "devDependencies": {
-    "@types/amqplib": "^0.10.8",
+    "@types/node": "^22.20.1",
     "tsx": "^4.23.1",
     "typescript": "^5.8.3"
   },

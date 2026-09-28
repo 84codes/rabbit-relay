@@ -1,10 +1,10 @@
 ---
 title: What is Rabbit Relay
-description: A type-safe RabbitMQ messaging framework for Node.js built on amqplib
+description: A type-safe RabbitMQ messaging framework for Node.js built on amqp-client.js
 icon: Lightbulb
 ---
 
-Rabbit Relay is a **type-safe RabbitMQ framework for Node.js** built on `amqplib`.
+Rabbit Relay is a **type-safe RabbitMQ framework for Node.js** built on `amqp-client.js`.
 
 It keeps exchanges, queues, routing keys, acknowledgements, retries, dead-letter queues, and publisher confirms **explicit** while adding the production patterns most teams build themselves.
 
@@ -12,7 +12,7 @@ It keeps exchanges, queues, routing keys, acknowledgements, retries, dead-letter
 
 ## Why Rabbit Relay?
 
-Raw `amqplib` gives you full control, but in real services it often leads to:
+Raw `amqp-client.js` gives you full control, but in real services it often leads to:
 
 - publishing without broker confirms
 - retry logic implemented differently everywhere
@@ -37,9 +37,9 @@ Rabbit Relay gives these patterns a **clear, typed, reusable shape**.
 
 ---
 
-## Rabbit Relay vs amqplib
+## Rabbit Relay vs amqp-client.js
 
-| Need | amqplib | Rabbit Relay |
+| Need | amqp-client.js | Rabbit Relay |
 |---|---|---|
 | Message contracts | Manual types | Typed event factories |
 | Reliable publishing | Confirm channels | Built-in confirms |

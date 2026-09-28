@@ -3,6 +3,14 @@ export * from "./eventFactories.js";
 export * from "./pluginManager.js";
 export * from "./utils/dedupe.js";
 export * from "./types.js";
+export type {
+  AmqpArguments,
+  AmqpConsumeOptions,
+  AmqpExchangeOptions,
+  AmqpPublishOptions,
+  AmqpQueueOptions,
+  Field,
+} from "./amqpOptions.js";
 export * from "./errors.js";
 export * from "./lifecycle.js";
 export * from "./otel.js";
